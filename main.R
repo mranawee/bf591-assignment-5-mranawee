@@ -2,7 +2,12 @@ library('tidyverse')
 library('SummarizedExperiment')
 library('DESeq2')
 library('biomaRt')
+library('dplyr')
 library('testthat')
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("fgsea")
 library('fgsea')
 
 #' Function to generate a SummarizedExperiment object with counts and coldata
@@ -18,10 +23,22 @@ library('fgsea')
 #' @export
 #'
 #' @examples se <- make_se('verse_counts.tsv', 'sample_metadata.csv', c('vP0', 'vAd'))
+
+
+
 make_se <- function(counts_csv, metafile_csv, subset) {
-  
-  return(NULL)
+  meta <- read_csv(metafile_csv)
+  sub <- filter(meta, timepoint %in% subset)
+  sub$timepoint <- as.factor(sub$timepoint)
+  sub_samples <- pull(sub, samplename)
+  counts <- data.matrix(read.delim(counts_csv, sep='\t', row.names = 'gene'))
+  subsets <- counts[,sub_samples]
+  return(SummarizedExperiment(assays = list(counts = subsets),
+                           colData = sub[c(7:8)]))
 }
+
+se <- make_se('verse_counts.tsv', 'sample_metadata.csv',c('vP0', 'vAd'))
+
 
 #' Function that runs DESeq2 and returns a named list containing the DESeq2
 #' results as a dataframe and the dds object returned by DESeq2
@@ -35,10 +52,17 @@ make_se <- function(counts_csv, metafile_csv, subset) {
 #' @export
 #'
 #' @examples results <- return_deseq_res(se, ~ timepoint)
+#' 
 return_deseq_res <- function(se, design) {
-  
-  return(NULL)
+  ds <- DESeq(DESeqDataSet(se, design = design))
+  res <- as.data.frame(results(ds))
+  #ds <- DESeq(ds)
+  return(list('res' = res, 'dds' = ds))
 }
+
+results <- return_deseq_res(se, ~timepoint)
+results
+
 
 #' Function that takes the DESeq2 results dataframe, converts it to a tibble and
 #' adds a column to denote plotting status in volcano plot. Column should denote
@@ -57,10 +81,20 @@ return_deseq_res <- function(se, design) {
 #' @export
 #'
 #' @examples labeled_results <- label_res(res, .10)
-label_res <- function(deseq2_res, padj_threshold) {
 
-  return(NULL)
+
+label_res <- function(deseq2_res, padj_threshold) {
+  res_tib <- as_tibble(deseq2_res$res, rownames = 'genes')
+  l_res <- res_tib %>%
+    mutate(volc_plot_status = case_when(
+      padj < padj_threshold & log2FoldChange > 0 ~ 'up',
+      padj < padj_threshold & log2FoldChange < 0 ~ 'down',
+      TRUE ~ 'ns'
+    ))
+  return(l_res)
 }
+
+labeled_results <- label_res(results, .10)
 
 #' Function to plot the unadjusted p-values as a histogram
 #'
@@ -71,10 +105,20 @@ label_res <- function(deseq2_res, padj_threshold) {
 #' @export
 #'
 #' @examples pval_plot <- plot_pvals(labeled_results)
-plot_pvals <- function(labeled_results) {
 
-  return(NULL)
+
+
+plot_pvals <- function(labeled_results) {
+  return(hist(labeled_results$pvalue,
+              main = 'Histogram of raw p values obtained from DE analysis (vP0 vs vAd)',
+              xlab = 'pvalue',
+              ylab = 'count',
+              col = 'lightblue',
+              border = 'black',
+              breaks = 50))
 }
+
+pval_plot <- plot_pvals(labeled_results)
 
 #' Function to plot the log2foldchange from DESeq2 results in a histogram
 #'
@@ -87,10 +131,19 @@ plot_pvals <- function(labeled_results) {
 #' @export
 #'
 #' @examples log2fc_plot <- plot_log2fc(labeled_results, .10)
-plot_log2fc <- function(labeled_results, padj_threshold) {
 
-  return(NULL)
+plot_log2fc <- function(labeled_results, padj_threshold) {
+  sig_labeled_results <- filter(labeled_results, padj < padj_threshold)
+  return(hist(sig_labeled_results$log2FoldChange,
+              main = 'Histogram of log 2 fold changes for DE genes (vP0 vs vAd)',
+              xlab = 'log2FoldChange',
+              ylab = 'count',
+              col = 'lightblue',
+              border = 'black',
+              breaks = 100))
 }
+
+log2fc_plot <- plot_log2fc(labeled_results, 0.1)
 
 #' Function to make scatter plot of normalized counts for top ten genes ranked
 #' by ascending padj
@@ -106,10 +159,45 @@ plot_log2fc <- function(labeled_results, padj_threshold) {
 #' @export
 #'
 #' @examples norm_counts_plot <- scatter_norm_counts(labeled_results, dds, 10)
-scatter_norm_counts <- function(labeled_results, dds_obj, num_genes){
 
-  return(NULL)
+top_ten <- labeled_results %>% 
+  top_n(10, padj) %>%
+  dplyr::select(genes)
+
+estSF <- estimateSizeFactors(results$dds)
+norm <- counts(estSF, normalized = TRUE)
+norm_tib <- as_tibble(norm, rownames='genes') %>%
+  filter(rownames(norm) %in% top_ten$genes)
+plt <- top_ten %>%
+  left_join(norm_tib, by='genes')%>%
+  gather(samplenames, norm_tib, -genes) %>%
+  ggplot() +
+  geom_point(aes(x=genes, y=log10(norm_tib), color = samplenames), position=position_jitter(w=0.1,h=0)) +
+  ggtitle('Plot of Log10(normalized counts) for top ten DE genes')+
+  theme(axis.text.x = element_text(angle = 90))
+plt
+
+scatter_norm_counts <- function(labeled_results, dds_obj, num_genes){
+  top_ten <- labeled_results %>%
+    top_n(num_genes, padj) %>%
+    dplyr::select(genes)
+  estSF <- estimateSizeFactors(dds_obj)
+  norm <- counts(estSF, normalized = TRUE)
+  norm_tib <- as_tibble(norm, rownames='genes') %>%
+    filter(rownames(norm) %in% top_ten$genes)
+  plt <- top_ten %>%
+    left_join(norm_tib, by='genes')%>%
+    gather(samplenames, norm_tib, -genes) %>%
+    ggplot() +
+      geom_point(aes(x=genes, y=log10(norm_tib), color=samplenames), position = position_jitter(w=0.1,h=0)) +
+      ggtitle('Plot of Log10(normalized counts) for top ten DE genes') +
+      theme(axis.text.x = element_text(angle=90))
+    
+  return(plt)
 }
+
+norm_counts_plot <- scatter_norm_counts(labeled_results, results$dds, 10)
+norm_counts_plot
 
 #' Function to generate volcano plot from DESeq2 results
 #'
@@ -123,6 +211,7 @@ scatter_norm_counts <- function(labeled_results, dds_obj, num_genes){
 #' @examples volcano_plot <- plot_volcano(labeled_results)
 #' 
 plot_volcano <- function(labeled_results) {
+  
 
   return(NULL)
 }
