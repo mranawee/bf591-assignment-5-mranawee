@@ -160,26 +160,9 @@ log2fc_plot <- plot_log2fc(labeled_results, 0.1)
 #'
 #' @examples norm_counts_plot <- scatter_norm_counts(labeled_results, dds, 10)
 
-top_ten <- labeled_results %>% 
-  top_n(10, padj) %>%
-  dplyr::select(genes)
-
-estSF <- estimateSizeFactors(results$dds)
-norm <- counts(estSF, normalized = TRUE)
-norm_tib <- as_tibble(norm, rownames='genes') %>%
-  filter(rownames(norm) %in% top_ten$genes)
-plt <- top_ten %>%
-  left_join(norm_tib, by='genes')%>%
-  gather(samplenames, norm_tib, -genes) %>%
-  ggplot() +
-  geom_point(aes(x=genes, y=log10(norm_tib), color = samplenames), position=position_jitter(w=0.1,h=0)) +
-  ggtitle('Plot of Log10(normalized counts) for top ten DE genes')+
-  theme(axis.text.x = element_text(angle = 90))
-plt
-
 scatter_norm_counts <- function(labeled_results, dds_obj, num_genes){
   top_ten <- labeled_results %>%
-    top_n(num_genes, padj) %>%
+    top_n(-num_genes, padj) %>%
     dplyr::select(genes)
   estSF <- estimateSizeFactors(dds_obj)
   norm <- counts(estSF, normalized = TRUE)
@@ -211,11 +194,19 @@ norm_counts_plot
 #' @examples volcano_plot <- plot_volcano(labeled_results)
 #' 
 plot_volcano <- function(labeled_results) {
-  
+  plt <- labeled_results %>%
+    ggplot() +
+    geom_point(aes(x=log2FoldChange, y=-log10(padj), color = volc_plot_status)) +
+    xlab('log2FoldChange') +
+    ylab('-log10(padj)') +
+    ggtitle('Volcano plot of DESeq2 differential expression results (vP0 vs vAd)') +
+    theme_minimal()
 
-  return(NULL)
+  return(plt)
 }
 
+volcano_plot <- plot_volcano(labeled_results)
+volcano_plot
 #' Function to run fgsea on DESeq2 results
 #'
 #' @param labeled_results (tibble): the labeled results from DESeq2
@@ -228,10 +219,40 @@ plot_volcano <- function(labeled_results) {
 #' @export
 #'
 #' @examples fgsea_results <- run_gsea(labeled_results, 'c2.cp.v7.5.1.symbols.gmt', 15, 500)
-run_gsea <- function(labeled_results, gmt, min_size, max_size) {
 
-  return(NULL)
+run_gsea <- function(labeled_results, gmt, min_size, max_size) {
+  human <- useMart('ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl')
+  mouse <- useMart('ENSEMBL_MART_ENSEMBL', dataset='mmusculus_gene_ensembl')
+  
+  labeled_results <- labeled_results %>% separate(genes, sep='\\.', into='genes', remove=TRUE)
+  gene_ids <- labeled_results %>% pull(genes)
+  
+  hgnc_symbols <- getLDS(attributes=c('ensembl_gene_id'), 
+                         filters='ensembl_gene_id', 
+                         values=gene_ids, 
+                         mart = mouse, 
+                         attributesL = c('hgnc_symbol'), 
+                         martL = human, 
+                         uniqueRows= TRUE)
+  
+  hgnc_results <- labeled_results %>% left_join(hgnc_symbols, by=c('genes' = 'Gene.stable.ID'))
+  
+  rnks <- hgnc_results %>% 
+    drop_na(HGNC.symbol, log2FoldChange) %>% 
+    distinct(HGNC.symbol, log2FoldChange, .keep_all=TRUE) %>%
+    arrange(desc(log2FoldChange)) %>% 
+    dplyr::select(HGNC.symbol, log2FoldChange) %>% 
+    deframe()
+  
+  c2_pathways <- gmtPathways(gmt)
+  
+  fgsea_results <- fgsea(c2_pathways, rnks, minSize=min_size, maxSize=max_size) %>% as_tibble()
+  
+  
+  return(fgsea_results)
 }
+
+fgsea_results <- run_gsea(labeled_results, 'c2.cp.v7.5.1.symbols.gmt',15,500)
 
 #' Function to plot top ten positive NES and top ten negative NES pathways
 #' in a barchart
@@ -247,6 +268,28 @@ run_gsea <- function(labeled_results, gmt, min_size, max_size) {
 #'
 #' @examples fgsea_plot <- top_pathways(fgsea_results, 10)
 top_pathways <- function(fgsea_results, num_paths){
+  top_pos <- fgsea_results %>% slice_max(NES, n=num_paths) %>% pull(pathway)
+  top_neg <- fgsea_results %>% slice_min(NES, n=num_paths) %>% pull(pathway)
+  
+  subset <- fgsea_results %>% 
+    filter(pathway %in% c(top_pos, top_neg)) %>%
+    mutate(pathway = factor(pathway)) %>%
+    mutate(plot_name = str_replace_all(pathway, '_', ' '))
+  
+  plot <- subset %>% 
+    mutate(plot_name = forcats::fct_reorder(factor(plot_name), NES)) %>%
+    ggplot() +
+    geom_bar(aes(x=plot_name, y=NES, fill = NES > 0), stat='identity', show.legend = FALSE) +
+    scale_fill_manual(values = c('TRUE' = 'red', 'FALSE' = 'blue')) + 
+    theme_minimal(base_size = 8) +
+    ggtitle('fgsea results for Hallmark MSigDB gene sets') +
+    ylab('Normalized Enrichment Score (NES)') +
+    xlab('') +
+    scale_x_discrete(labels = function(x) str_wrap(x, width = 80)) +
+    coord_flip()
+  return(plot)
 
-  return(NULL)
 }
+
+fgsea_plot <- top_pathways(fgsea_results, 10)
+fgsea_plot
